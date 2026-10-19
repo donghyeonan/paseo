@@ -205,19 +205,23 @@ test.describe("touch screen wide enough for the desktop layout", () => {
         title: "Second touch chat",
       });
       await openWorkspaceWithAgents(page, [first, second]);
-      await composerLocator(page).fill("Keep this touch draft");
-      await expectComposerFocused(page);
-      // An external keyboard changes tabs without a pointer click blurring the
-      // editor first. The device still has a touch-primary focus policy.
-      await switchComposerTabWithKeyboard(page, "previous");
-      await expectComposerDraft(page, "");
-      await switchComposerTabWithKeyboard(page, "next");
-      await expectComposerDraft(page, "Keep this touch draft");
-      await expectComposerNotFocused(page);
-      await composerLocator(page).tap();
-      await expectComposerFocused(page);
-      await typeIntoFocusedComposer(page, " after return");
-      await expectComposerDraft(page, "Keep this touch draft after return");
+      // Repeat after an explicit edit so retained focus from an earlier visit is
+      // also dismissed when the same mounted editor becomes inactive again.
+      for (const draft of ["Keep this touch draft", "Edit this touch draft again"]) {
+        await composerLocator(page).fill(draft);
+        await expectComposerFocused(page);
+        // An external keyboard changes tabs without a pointer click blurring the
+        // editor first. The device still has a touch-primary focus policy.
+        await switchComposerTabWithKeyboard(page, "previous");
+        await expectComposerDraft(page, "");
+        await switchComposerTabWithKeyboard(page, "next");
+        await expectComposerDraft(page, draft);
+        await expectComposerNotFocused(page);
+        await composerLocator(page).tap();
+        await expectComposerFocused(page);
+        await typeIntoFocusedComposer(page, " after return");
+        await expectComposerDraft(page, `${draft} after return`);
+      }
     } finally {
       await workspace.cleanup();
     }
