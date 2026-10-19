@@ -775,7 +775,7 @@ function NativeTerminalEmulator({
   );
 
   const handlePanResponderScroll = useCallback(
-    (currentDy: number) => {
+    (currentDy: number, point: { x: number; y: number }) => {
       const cellHeight = metricsRef.current?.cellHeight;
       if (!cellHeight || cellHeight <= 0) {
         return;
@@ -792,6 +792,21 @@ function NativeTerminalEmulator({
       const { rowDelta } = update;
       if (rowDelta === 0) {
         return;
+      }
+      const metrics = metricsRef.current;
+      if (metrics) {
+        const report = inputModeTrackerRef.current.encodeWheel({
+          direction: rowDelta > 0 ? "up" : "down",
+          col: Math.floor(Math.max(0, point.x) / metrics.cellWidth) + 1,
+          row: Math.floor(Math.max(0, point.y) / metrics.cellHeight) + 1,
+          pixelX: Math.max(0, point.x) + 1,
+          pixelY: Math.max(0, point.y) + 1,
+          count: Math.abs(rowDelta),
+        });
+        if (report !== null) {
+          callbacksRef.current.onInput?.(report);
+          return;
+        }
       }
       if (rowDelta > 0) {
         applyScroll("up", rowDelta);
@@ -873,7 +888,10 @@ function NativeTerminalEmulator({
           }
 
           if (panState.intent === "scroll") {
-            handlePanResponderScroll(gesture.dy);
+            handlePanResponderScroll(gesture.dy, {
+              x: event.nativeEvent.locationX,
+              y: event.nativeEvent.locationY,
+            });
             return;
           }
           if (panState.didNavigate) {
@@ -901,7 +919,7 @@ function NativeTerminalEmulator({
 
             if (intent === "scroll") {
               selectionPressRef.current = null;
-              handlePanResponderScroll(gesture.dy);
+              handlePanResponderScroll(gesture.dy, point);
               return;
             }
 

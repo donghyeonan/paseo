@@ -6367,6 +6367,9 @@ export const TerminalCursorSchema = z.object({
 });
 
 export const TerminalStateSchema = z.object({
+  // Optional for old peers. Select the buffer before replaying its contents.
+  alternateScreen: z.boolean().optional(),
+  wraparound: z.boolean().optional(),
   rows: z.number(),
   cols: z.number(),
   grid: z.array(z.array(TerminalCellSchema)),

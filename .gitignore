@@ -71,6 +71,11 @@ CLAUDE.local.md
 **/.tanstack/
 
 # Local agent/tooling artifacts (do not commit)
+/var/
+/.superloopy/
+packages/app/.vitest-attachments/
+packages/app/.vitest-screenshots/
+packages/app/src/terminal/runtime/__screenshots__/
 PLAN.md
 .valknut/
 valknut-report.html/

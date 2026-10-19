@@ -1,5 +1,6 @@
 import * as pty from "node-pty";
 import xterm, { type Terminal as TerminalType } from "@xterm/headless";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { randomUUID } from "crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
@@ -580,7 +581,7 @@ function extractCell(terminal: TerminalType, row: number, col: number): Terminal
   const bg = bgMode !== 0 ? cell.getBgColor() : undefined;
 
   return {
-    char: cell.getChars() || " ",
+    char: cell.getWidth() === 0 ? "" : cell.getChars() || " ",
     fg,
     bg,
     fgMode: fgMode !== 0 ? fgMode : undefined,
@@ -639,7 +640,7 @@ function extractScrollback(
           const fg = fgMode !== 0 ? cell.getFgColor() : undefined;
           const bg = bgMode !== 0 ? cell.getBgColor() : undefined;
           rowCells.push({
-            char: cell.getChars() || " ",
+            char: cell.getWidth() === 0 ? "" : cell.getChars() || " ",
             fg,
             bg,
             fgMode: fgMode !== 0 ? fgMode : undefined,
@@ -934,6 +935,10 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     scrollback: 1000,
     allowProposedApi: true,
   });
+
+  // Match the browser renderer's width table before parsing any PTY output.
+  terminal.loadAddon(new Unicode11Addon());
+  terminal.unicode.activeVersion = "11";
 
   ensureNodePtySpawnHelperExecutableForCurrentPlatform();
 
@@ -1239,6 +1244,8 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
 
   function getState(snapshotOptions?: TerminalStateSnapshotOptions): TerminalState {
     return {
+      alternateScreen: terminal.buffer.active.type === "alternate",
+      wraparound: terminal.modes.wraparoundMode,
       rows: terminal.rows,
       cols: terminal.cols,
       grid: extractGrid(terminal),

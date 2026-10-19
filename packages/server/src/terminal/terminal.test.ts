@@ -185,6 +185,35 @@ async function waitForScheduledTimers(expectedTimerCount: number): Promise<void>
 }
 
 describe("createTerminal", () => {
+  it("captures fullscreen Korean cells and reconnect mouse state from a real PTY", async () => {
+    const session = trackSession(
+      await createTerminal({
+        cwd: tmpdir(),
+        workspaceId: "restore-regression",
+        rows: 4,
+        cols: 20,
+        command: process.execPath,
+        args: [
+          "-e",
+          'process.stdout.write("\\x1b[?1049h\\x1b[?7l\\x1b[?1003h\\x1b[?1006h한글 😀!");setInterval(()=>{},1000)',
+        ],
+      }),
+    );
+    const state = await waitForState(session, (s) => s.grid[0]?.[0]?.char === "한");
+    expect(state.alternateScreen).toBe(true);
+    expect(state.wraparound).toBe(false);
+    expect(state.grid[0].slice(0, 8).map((c) => c.char)).toEqual([
+      "한",
+      "",
+      "글",
+      "",
+      " ",
+      "😀",
+      "",
+      "!",
+    ]);
+    expect(session.getReplayPreamble()).toContain("\x1b[?1003h\x1b[?1006h");
+  });
   it("keeps full process titles while stripping path prefixes", () => {
     expect(normalizeProcessTitle("   /usr/local/bin/npm   run   dev   ")).toBe("npm run dev");
     expect(normalizeProcessTitle("/opt/homebrew/bin/node /tmp/work/npm-cli.js run dev")).toBe(

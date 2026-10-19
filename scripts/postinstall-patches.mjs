@@ -8,6 +8,18 @@ import { join, relative } from "node:path";
 // workspace root live in their workspace's own node_modules, and patch-package resolves
 // the patch's node_modules/... paths relative to its working directory.
 const patchedPackages = [
+  // Atlas page identity must be checked when compaction reuses a GPU texture slot.
+  {
+    nodeModulesPath: "packages/app/node_modules/@xterm/addon-webgl",
+    patchPrefix: "@xterm+addon-webgl+",
+    cwd: "packages/app",
+  },
+  // Kitty placement deletion must retain payloads and erase deleted tile references.
+  {
+    nodeModulesPath: "packages/app/node_modules/@xterm/addon-image",
+    patchPrefix: "@xterm+addon-image+",
+    cwd: "packages/app",
+  },
   {
     nodeModulesPath: "node_modules/react-native-markdown-display",
     patchPrefix: "react-native-markdown-display+",

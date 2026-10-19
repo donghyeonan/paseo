@@ -5,6 +5,7 @@ import {
   type Terminal as HeadlessTerminalInstance,
 } from "@xterm/headless";
 import type { TerminalCell, TerminalState } from "@getpaseo/protocol/messages";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 
 export type NativeTerminalWriteData = Uint8Array | string;
 export interface NativeTerminalCell extends TerminalCell {
@@ -340,6 +341,8 @@ export function createNativeHeadlessTerminal(
     scrollback: options.scrollbackLines ?? 1000,
     allowProposedApi: true,
   });
+  terminal.loadAddon(new Unicode11Addon());
+  terminal.unicode.activeVersion = "11";
   const decoder = new TextDecoder();
   let coordinateEpoch = 0;
   const coordinateStorage = new Map<object, TerminalCoordinateStorage>();

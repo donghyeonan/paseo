@@ -20,7 +20,7 @@
     "lint": "expo lint",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run",
-    "test:browser": "vitest run --project browser",
+    "test:browser": "vitest run --project browser --project browser-touch",
     "test:e2e": "playwright test --project=browser",
     "test:e2e:diff-performance": "cross-env PASEO_DIFF_PERF_E2E=1 playwright test --project=browser e2e/browser/diff-performance.spec.ts",
     "test:e2e:stream-smoothness": "cross-env PASEO_AGENT_STREAM_PERF_E2E=1 playwright test --project=browser e2e/browser/agent-stream-smoothness.spec.ts",

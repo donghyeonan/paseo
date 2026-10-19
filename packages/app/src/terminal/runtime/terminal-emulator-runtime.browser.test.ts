@@ -1,5 +1,6 @@
+import "@xterm/xterm/css/xterm.css";
 import { page, userEvent } from "@vitest/browser/context";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { TerminalInputModeState } from "@getpaseo/protocol/terminal-input-mode";
 import { encodeTerminalOutput, TerminalEmulatorRuntime } from "./terminal-emulator-runtime";
 
@@ -78,6 +79,7 @@ interface CreateTerminalHostInput {
   height: number;
   scrollback?: number;
   isMac?: boolean;
+  fontSize?: number;
 }
 
 function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
@@ -127,6 +129,7 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
     host,
     initialSnapshot: null,
     scrollback: input.scrollback ?? 10_000,
+    fontSize: input.fontSize,
     theme: {
       background: "#0b0b0b",
       foreground: "#e6e6e6",
@@ -146,6 +149,45 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
   };
   mountedTerminals.push(mounted);
   return mounted;
+}
+
+function terminalScreen(host: HTMLElement): HTMLElement {
+  const screen = host.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen) throw new Error("Expected xterm screen to be mounted");
+  return screen;
+}
+
+function screenTouch(input: { screen: HTMLElement; x: number; y: number }): Touch {
+  const bounds = input.screen.getBoundingClientRect();
+  const clientX = bounds.left + input.x;
+  const clientY = bounds.top + input.y;
+  return new Touch({
+    identifier: 1,
+    target: input.screen,
+    clientX,
+    clientY,
+    pageX: clientX + window.scrollX,
+    pageY: clientY + window.scrollY,
+    screenX: clientX,
+    screenY: clientY,
+  });
+}
+
+function dispatchScreenTouch(input: {
+  screen: HTMLElement;
+  type: "touchstart" | "touchmove" | "touchend";
+  touch: Touch;
+}): TouchEvent {
+  const activeTouches = input.type === "touchend" ? [] : [input.touch];
+  const event = new TouchEvent(input.type, {
+    touches: activeTouches,
+    targetTouches: activeTouches,
+    changedTouches: [input.touch],
+    bubbles: true,
+    cancelable: true,
+  });
+  input.screen.dispatchEvent(event);
+  return event;
 }
 
 function latestSize(sizes: TerminalSize[]): TerminalSize {
@@ -219,13 +261,14 @@ function hyperlink(input: { url: string; text: string }): string {
   return `\x1b]8;;${input.url}\x1b\\${input.text}\x1b]8;;\x1b\\`;
 }
 
-function writeLines(mounted: MountedTerminal, lines: string[]): Promise<void> {
+function writeTerminalOutput(mounted: MountedTerminal, text: string): Promise<void> {
   return new Promise((resolve) => {
-    mounted.runtime.write({
-      data: terminalOutput(lines.map((line) => `${line}\r\n`).join("")),
-      onCommitted: resolve,
-    });
+    mounted.runtime.write({ data: terminalOutput(text), onCommitted: resolve });
   });
+}
+
+function writeLines(mounted: MountedTerminal, lines: string[]): Promise<void> {
+  return writeTerminalOutput(mounted, lines.map((line) => `${line}\r\n`).join(""));
 }
 
 async function clickTerminalLink(input: {
@@ -258,6 +301,172 @@ afterEach(() => {
 });
 
 describe("terminal emulator runtime in a real browser", () => {
+  it.each([13, 6])(
+    "forwards wheel and touch to the fullscreen application after snapshot reset (fontSize=%s)",
+    async (fontSize) => {
+      const mounted = createTerminalHost({ width: 720, height: 360, fontSize });
+      const xtermElement = mounted.host.querySelector<HTMLElement>(".xterm");
+      if (!xtermElement) throw new Error("Missing xterm element");
+      xtermElement.style.padding = "12px";
+      mounted.root.style.left = "23px";
+      mounted.root.style.top = "31px";
+      mounted.runtime.resize({ forceRefresh: true, shouldClaim: false });
+      const size = latestSize(mounted.sizes);
+      const snapshot = "\x1b[?1049h\x1b[?7l한글\x1b[4;1H입력> ";
+      const documentMoves: Event[] = [];
+      const controller = new AbortController();
+      document.addEventListener("touchmove", (event) => documentMoves.push(event), {
+        signal: controller.signal,
+      });
+      onTestFinished(() => controller.abort());
+      await writeLines(mounted, [snapshot]);
+      for (let reconnect = 0; reconnect < 3; reconnect++) {
+        documentMoves.length = 0;
+        await new Promise<void>((resolve) =>
+          mounted.runtime.write({
+            data: terminalOutput("\x1b[?1003h\x1b[?1006h"),
+            onCommitted: resolve,
+          }),
+        );
+        mounted.inputs.length = 0;
+        const screen = terminalScreen(mounted.host);
+        const cellWidth = screen.clientWidth / size.cols;
+        const cellHeight = screen.clientHeight / size.rows;
+        const col = size.cols - 3;
+        const x = (col - 0.5) * cellWidth;
+        const startY = 5.5 * cellHeight;
+        const start = screenTouch({ screen, x, y: startY });
+        screen.dispatchEvent(
+          new WheelEvent("wheel", {
+            deltaY: -1,
+            deltaMode: WheelEvent.DOM_DELTA_LINE,
+            clientX: start.clientX,
+            clientY: start.clientY,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        expect(mounted.inputs).toEqual([`\x1b[<64;${col};6M`]);
+        mounted.inputs.length = 0;
+
+        dispatchScreenTouch({ screen, type: "touchstart", touch: start });
+        const undecided = screenTouch({ screen, x, y: startY + cellHeight / 4 });
+        const undecidedMove = dispatchScreenTouch({ screen, type: "touchmove", touch: undecided });
+        expect(mounted.inputs).toEqual([]);
+        const moved = screenTouch({ screen, x, y: startY + 4 * cellHeight });
+        const move = dispatchScreenTouch({ screen, type: "touchmove", touch: moved });
+        expect(move.defaultPrevented).toBe(true);
+        expect(mounted.inputs.join("")).toBe(`\x1b[<64;${col};10M`.repeat(4));
+        mounted.inputs.length = 0;
+
+        const reversed = screenTouch({ screen, x, y: startY - 2 * cellHeight });
+        dispatchScreenTouch({ screen, type: "touchmove", touch: reversed });
+        expect(mounted.inputs.join("")).toBe(`\x1b[<65;${col};4M`.repeat(6));
+        dispatchScreenTouch({ screen, type: "touchend", touch: reversed });
+        await nextFrame();
+        await nextFrame();
+        expect(mounted.inputs.join("")).toBe(`\x1b[<65;${col};4M`.repeat(6));
+        expect(documentMoves).toEqual([undecidedMove]);
+
+        const terminal = window.__paseoTerminal;
+        expect(terminal?.buffer.active.type).toBe("alternate");
+        expect(terminal?.buffer.active.getLine(0)?.translateToString(true)).toBe("한글");
+        expect(terminal?.buffer.active.getLine(3)?.translateToString(true)).toBe("입력> ");
+        await new Promise<void>((resolve) =>
+          mounted.runtime.restoreOutput({
+            data: terminalOutput(snapshot),
+            rows: size.rows,
+            cols: size.cols,
+            onCommitted: resolve,
+          }),
+        );
+      }
+    },
+  );
+  it("retains history wheel scrolling, selection, keyboard and unclaimed touch propagation", async () => {
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+    await writeLines(
+      mounted,
+      Array.from({ length: 80 }, (_, index) => `history line ${index}`),
+    );
+    await nextFrame();
+    await nextFrame();
+    const terminal = window.__paseoTerminal;
+    if (!terminal) throw new Error("Missing terminal");
+    const screen = terminalScreen(mounted.host);
+    const startViewport = terminal.buffer.active.viewportY;
+    terminal.select(0, startViewport, 7);
+    expect(terminal.getSelection()).toBe("history");
+
+    await userEvent.wheel(screen, { delta: { y: -120 } });
+    await waitFor({ predicate: () => terminal.buffer.active.viewportY < startViewport });
+    expect(terminal.getSelection()).toBe("history");
+    expect(mounted.inputs).toEqual([]);
+
+    const documentMoves: Event[] = [];
+    const controller = new AbortController();
+    document.addEventListener("touchmove", (event) => documentMoves.push(event), {
+      signal: controller.signal,
+    });
+    onTestFinished(() => controller.abort());
+    const start = screenTouch({ screen, x: 40, y: 120 });
+    dispatchScreenTouch({ screen, type: "touchstart", touch: start });
+    await nextFrame();
+    const moved = screenTouch({ screen, x: 40, y: 180 });
+    const move = dispatchScreenTouch({ screen, type: "touchmove", touch: moved });
+    dispatchScreenTouch({ screen, type: "touchend", touch: moved });
+    expect(documentMoves).toEqual([move]);
+    expect(terminal.getSelection()).toBe("history");
+    expect(mounted.inputs).toEqual([]);
+
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowUp", keyCode: 38 });
+    mounted.runtime.paste("typed input");
+    expect(mounted.inputs).toEqual(["\x1b[A", "typed input"]);
+  });
+
+  it("does not forward UTF-8-corrupted legacy mouse reports from screen touches", async () => {
+    const mounted = createTerminalHost({ width: 1200, height: 360 });
+    await writeLines(mounted, ["\x1b[?1049h\x1b[?1003h"]);
+    const size = latestSize(mounted.sizes);
+    const screen = terminalScreen(mounted.host);
+    const x = 100.5 * (screen.clientWidth / size.cols);
+    const cellHeight = screen.clientHeight / size.rows;
+    const start = screenTouch({ screen, x, y: 4.5 * cellHeight });
+    const moved = screenTouch({ screen, x, y: 8.5 * cellHeight });
+    dispatchScreenTouch({ screen, type: "touchstart", touch: start });
+    await nextFrame();
+    dispatchScreenTouch({ screen, type: "touchmove", touch: moved });
+    dispatchScreenTouch({ screen, type: "touchend", touch: moved });
+    await nextFrame();
+    expect(mounted.inputs).toEqual([]);
+  });
+
+  it("stops reporting app mouse input after a split RIS reset", async () => {
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+    await writeLines(mounted, ["\x1b[>7u\x1b[?9001;1;2004;1003;1006h"]);
+    await writeTerminalOutput(mounted, "\x1b");
+    await writeTerminalOutput(mounted, "c");
+    expect(mounted.runtime.getInputModeState()).toEqual({
+      kittyKeyboardFlags: 0,
+      win32InputMode: false,
+      applicationCursorKeys: false,
+      bracketedPaste: false,
+    });
+    const screen = terminalScreen(mounted.host);
+    const start = screenTouch({ screen, x: 40, y: 80 });
+    const moved = screenTouch({ screen, x: 40, y: 140 });
+    dispatchScreenTouch({ screen, type: "touchstart", touch: start });
+    await nextFrame();
+    dispatchScreenTouch({ screen, type: "touchmove", touch: moved });
+    dispatchScreenTouch({ screen, type: "touchend", touch: moved });
+    await nextFrame();
+    expect(mounted.inputs).toEqual([]);
+
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowUp", keyCode: 38 });
+    mounted.runtime.paste("plain paste");
+    expect(mounted.inputs).toEqual(["\x1b[A", "plain paste"]);
+  });
+
   it("passes configured scrollback to xterm", async () => {
     await page.viewport(900, 600);
     createTerminalHost({ width: 720, height: 360, scrollback: 42_000 });
@@ -659,6 +868,41 @@ describe("terminal emulator runtime in a real browser", () => {
     await nextFrame();
 
     expect(reset).not.toHaveBeenCalled();
+  });
+
+  it("opens a wrapped absolute file path from its continuation rows", async () => {
+    const mounted = createTerminalHost({ width: 280, height: 260 });
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    const opened: string[] = [];
+    mounted.runtime.setCallbacks({
+      callbacks: {
+        onResolveLocalFileLink: (source) => ({ path: source.path }),
+        onOpenLocalFileLink: (target) => {
+          opened.push(target.path);
+        },
+      },
+    });
+    const path =
+      "/workspace/project/reports/long-nested-directory/terminal-rendering-regression-20261019.html";
+    const columns = latestSize(mounted.sizes).cols;
+    expect(path.length + 5).toBeGreaterThan(columns * 2);
+    await writeTerminalOutput(mounted, `read ${path}`);
+    await clickTerminalLink({ host: mounted.host, row: 1, col: 2 });
+    await clickTerminalLink({ host: mounted.host, row: 2, col: 2 });
+    expect(opened).toEqual([path, path]);
+  });
+
+  it.each([
+    { printed: "https://example.test/preview.html에서", url: "https://example.test/preview.html" },
+    { printed: "https://example.test/wiki/서울에서", url: "https://example.test/wiki/서울에서" },
+    { printed: "https://example.test/wiki/대한민국", url: "https://example.test/wiki/대한민국" },
+  ])("opens the intended URL from $printed", async ({ printed, url }) => {
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+    await writeLines(mounted, [printed]);
+
+    await clickTerminalLink({ host: mounted.host, row: 0, col: 4 });
+
+    expect(mounted.openedUrls).toEqual([url]);
   });
 
   it("opens OSC 8 hyperlinks the same way as plain-text URLs", async () => {

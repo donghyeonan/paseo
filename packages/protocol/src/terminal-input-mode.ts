@@ -21,8 +21,8 @@ const ESC = String.fromCharCode(0x1b);
 const APPLICATION_CURSOR_KEYS_MODE = 1;
 const WIN32_INPUT_MODE = 9001;
 const BRACKETED_PASTE_MODE = 2004;
-const CSI_INPUT_MODE_SEQUENCE = new RegExp(
-  `${ESC}\\[(?:([<>=?]?)([0-9;]*)u|\\?([0-9;]*)([hl]))`,
+const INPUT_MODE_SEQUENCE = new RegExp(
+  `${ESC}(?:c|\\[(?:([<>=?]?)([0-9;]*)u|\\?([0-9;]*)([hl])))`,
   "g",
 );
 const INCOMPLETE_CSI_INPUT_MODE_SEQUENCE = new RegExp(`${ESC}\\[[<>=?]?[0-9;]*$`);
@@ -74,6 +74,8 @@ export class TerminalInputModeTracker {
   private win32InputMode = false;
   private applicationCursorKeys = false;
   private bracketedPaste = false;
+  private mouseTrackingMode = 0;
+  private mouseEncodingMode = 0;
   private readonly kittyKeyboardStack: number[] = [];
   private pending = "";
 
@@ -89,13 +91,19 @@ export class TerminalInputModeTracker {
     const responses: string[] = [];
     let consumedUntil = 0;
 
-    CSI_INPUT_MODE_SEQUENCE.lastIndex = 0;
+    INPUT_MODE_SEQUENCE.lastIndex = 0;
     for (;;) {
-      const match = CSI_INPUT_MODE_SEQUENCE.exec(text);
+      const match = INPUT_MODE_SEQUENCE.exec(text);
       if (!match) {
         break;
       }
-      consumedUntil = CSI_INPUT_MODE_SEQUENCE.lastIndex;
+      consumedUntil = INPUT_MODE_SEQUENCE.lastIndex;
+
+      if (match[0] === `${ESC}c`) {
+        changed = this.getPreamble().length > 0 || changed;
+        this.reset();
+        continue;
+      }
 
       if (match[4]) {
         changed = this.applyPrivateModeSequence(match[3] ?? "", match[4]) || changed;
@@ -108,10 +116,10 @@ export class TerminalInputModeTracker {
     }
 
     const tail = text.slice(consumedUntil);
-    const pendingStart = tail.lastIndexOf(`${ESC}[`);
+    const pendingStart = tail.lastIndexOf(ESC);
     if (pendingStart >= 0) {
       const pending = tail.slice(pendingStart);
-      if (INCOMPLETE_CSI_INPUT_MODE_SEQUENCE.test(pending)) {
+      if (pending === ESC || INCOMPLETE_CSI_INPUT_MODE_SEQUENCE.test(pending)) {
         this.pending = pending;
       }
     }
@@ -124,6 +132,8 @@ export class TerminalInputModeTracker {
     this.win32InputMode = false;
     this.applicationCursorKeys = false;
     this.bracketedPaste = false;
+    this.mouseTrackingMode = 0;
+    this.mouseEncodingMode = 0;
     this.kittyKeyboardStack.length = 0;
     this.pending = "";
   }
@@ -159,7 +169,29 @@ export class TerminalInputModeTracker {
     if (this.bracketedPaste) {
       parts.push("\x1b[?2004h");
     }
+    // Buffer selection is restored before the snapshot, never in this trailing preamble.
+    if (this.mouseTrackingMode) parts.push(`\x1b[?${this.mouseTrackingMode}h`);
+    if (this.mouseEncodingMode) parts.push(`\x1b[?${this.mouseEncodingMode}h`);
     return parts.join("");
+  }
+
+  encodeWheel(input: {
+    direction: "up" | "down";
+    col: number;
+    row: number;
+    pixelX: number;
+    pixelY: number;
+    count: number;
+  }): string | null {
+    // Input is UTF-8 text; classic mouse reports require a separate binary transport.
+    if (!this.mouseTrackingMode || this.mouseTrackingMode === 9 || !this.mouseEncodingMode) {
+      return null;
+    }
+    const button = input.direction === "up" ? 64 : 65;
+    const x = Math.max(1, Math.floor(this.mouseEncodingMode === 1016 ? input.pixelX : input.col));
+    const y = Math.max(1, Math.floor(this.mouseEncodingMode === 1016 ? input.pixelY : input.row));
+    const report = `\x1b[<${button};${x};${y}M`;
+    return report.repeat(Math.max(0, Math.min(100, Math.floor(input.count))));
   }
 
   private applyKittyKeyboardSequence(
@@ -204,6 +236,18 @@ export class TerminalInputModeTracker {
   private applyPrivateModeSequence(params: string, final: string): boolean {
     const modes = parsePrivateModeParams(params);
     let changed = false;
+    for (const mode of modes) {
+      if ([9, 1000, 1002, 1003].includes(mode)) {
+        const next = final === "h" ? mode : 0;
+        changed = this.mouseTrackingMode !== next || changed;
+        this.mouseTrackingMode = next;
+      }
+      if ([1006, 1016].includes(mode)) {
+        const next = final === "h" ? mode : 0;
+        changed = this.mouseEncodingMode !== next || changed;
+        this.mouseEncodingMode = next;
+      }
+    }
 
     if (modes.has(WIN32_INPUT_MODE)) {
       const previous = this.win32InputMode;

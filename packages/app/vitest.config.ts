@@ -35,13 +35,35 @@ export default defineConfig({
           include: ["src/**/*.browser.{test,spec}.{ts,tsx}"],
           browser: {
             enabled: true,
-            provider: playwright(),
+            // Exercise the real WebGL renderer even on GPU-less CI hosts.
+            provider: playwright({
+              launchOptions: { args: ["--enable-unsafe-swiftshader"] },
+            }),
             headless: true,
             connectTimeout: 180_000,
             instances: [{ browser: "chromium" }],
             screenshotDirectory: ".vitest-screenshots",
           },
           globalSetup: path.resolve(__dirname, "src/runtime/websocket-test-global-setup.ts"),
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "browser-touch",
+          include: ["src/terminal/runtime/terminal-emulator-runtime.browser.test.ts"],
+          setupFiles: [path.resolve(__dirname, "vitest.touch.setup.ts")],
+          fileParallelism: false,
+          browser: {
+            enabled: true,
+            headless: true,
+            screenshotDirectory: ".vitest-screenshots",
+            provider: playwright({
+              launchOptions: { args: ["--enable-unsafe-swiftshader"] },
+              contextOptions: { hasTouch: true },
+            }),
+            instances: [{ browser: "chromium" }],
+          },
         },
       },
     ],

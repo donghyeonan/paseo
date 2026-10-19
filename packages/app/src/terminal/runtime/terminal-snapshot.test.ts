@@ -3,6 +3,7 @@ import { Terminal as ClientTerminal } from "@xterm/xterm";
 import { describe, expect, it } from "vitest";
 
 import { renderTerminalSnapshotToAnsi } from "./terminal-snapshot";
+import { TerminalInputModeTracker } from "@getpaseo/protocol/terminal-input-mode";
 
 interface SnapshotCell {
   char: string;
@@ -16,6 +17,8 @@ interface SnapshotCell {
 }
 
 interface SnapshotState {
+  alternateScreen: boolean;
+  wraparound: boolean;
   rows: number;
   cols: number;
   grid: SnapshotCell[][];
@@ -52,6 +55,8 @@ function extractState(terminal: ClientTerminal | HeadlessTerminal): SnapshotStat
   }
 
   return {
+    alternateScreen: terminal.buffer.active.type === "alternate",
+    wraparound: terminal.modes.wraparoundMode,
     rows: terminal.rows,
     cols: terminal.cols,
     grid,
@@ -107,7 +112,7 @@ function extractRow(terminal: ClientTerminal | HeadlessTerminal, row: number): S
     const fgMode = fgModeRaw >> 24;
     const bgMode = bgModeRaw >> 24;
     cells.push({
-      char: cell.getChars() || " ",
+      char: cell.getWidth() === 0 ? "" : cell.getChars() || " ",
       fg: fgMode !== 0 ? cell.getFgColor() : undefined,
       bg: bgMode !== 0 ? cell.getBgColor() : undefined,
       fgMode: fgMode !== 0 ? fgMode : undefined,
@@ -122,6 +127,29 @@ function extractRow(terminal: ClientTerminal | HeadlessTerminal, row: number): S
 }
 
 describe("terminal-snapshot", () => {
+  it("keeps fullscreen cells, cursor, mouse reporting and no-wrap through repeated reconnects", async () => {
+    const source = new HeadlessTerminal({ rows: 4, cols: 20, allowProposedApi: true });
+    const client = new ClientTerminal({ rows: 4, cols: 20, allowProposedApi: true });
+    const tracker = new TerminalInputModeTracker();
+    const output =
+      "\x1b[?1049h\x1b[?7l\x1b[?1003h\x1b[?1006h한글 😀!\r\n\x1b[32m대화\x1b[0m\x1b[4;1H입력> ";
+    tracker.feed(output);
+    await writeToTerminal(source, output);
+    const snapshot = extractState(source);
+    for (let reconnect = 0; reconnect < 3; reconnect++) {
+      await writeToTerminal(
+        client,
+        "\x1bc" + renderTerminalSnapshotToAnsi(snapshot) + tracker.getPreamble(),
+      );
+      expect(extractState(client)).toEqual(snapshot);
+      expect(client.buffer.active.type).toBe("alternate");
+      expect(client.modes.mouseTrackingMode).toBe("any");
+      expect(client.modes.wraparoundMode).toBe(false);
+      expect(client.buffer.active.getLine(0)?.translateToString(true)).toBe("한글 😀!");
+    }
+    source.dispose();
+    client.dispose();
+  });
   it("replays extracted terminal state into a client xterm with matching grid, scrollback, and cursor presentation", async () => {
     const source = new HeadlessTerminal({
       rows: 4,

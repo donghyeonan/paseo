@@ -25,6 +25,7 @@ import {
   shouldInterceptDomTerminalKey,
 } from "@/utils/terminal-keys";
 import { renderTerminalSnapshotToAnsi } from "./terminal-snapshot";
+import { TERMINAL_URL_REGEX } from "./terminal-web-links";
 import {
   createTerminalLocalFileLinkProvider,
   type TerminalLocalFileLinkSource,
@@ -152,7 +153,6 @@ const isAppleHandheld =
     maxTouchPoints: navigator.maxTouchPoints,
   });
 
-const DEFAULT_TOUCH_SCROLL_LINE_HEIGHT_PX = 18;
 const FIT_TIMEOUT_DELAYS_MS = [0, 16, 48, 120, 250, 500, 1_000, 2_000];
 const OUTPUT_OPERATION_TIMEOUT_MS = 5_000;
 const EMPTY_TERMINAL_OUTPUT = new Uint8Array(0);
@@ -494,7 +494,7 @@ export class TerminalEmulatorRuntime {
     let imageAddon: ImageAddon | null = null;
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(unicode11Addon);
-    terminal.loadAddon(new WebLinksAddon(openExternalLink));
+    terminal.loadAddon(new WebLinksAddon(openExternalLink, { urlRegex: TERMINAL_URL_REGEX }));
     const localFileLinkProvider = terminal.registerLinkProvider(
       createTerminalLocalFileLinkProvider(terminal, {
         resolveLink: async (source) => {
@@ -1280,12 +1280,9 @@ export class TerminalEmulatorRuntime {
     host: HTMLDivElement;
     terminal: Terminal;
   }): () => void {
+    const screen = input.host.querySelector<HTMLElement>(".xterm-screen");
+    if (!screen) return () => {};
     let touchScrollRemainderPx = 0;
-    const measuredLineHeight =
-      input.host.querySelector<HTMLElement>(".xterm-rows > div")?.getBoundingClientRect().height ??
-      0;
-    const touchScrollLineHeightPx =
-      measuredLineHeight > 0 ? measuredLineHeight : DEFAULT_TOUCH_SCROLL_LINE_HEIGHT_PX;
 
     const activeTouch = {
       identifier: -1,
@@ -1305,7 +1302,8 @@ export class TerminalEmulatorRuntime {
       }
 
       const touch = event.touches[0];
-      if (!touch) {
+      const targetsScreen = touch?.target instanceof Node && screen.contains(touch.target);
+      if (!touch || !targetsScreen) {
         touchScrollRemainderPx = 0;
         activeTouch.identifier = -1;
         activeTouch.mode = null;
@@ -1333,32 +1331,55 @@ export class TerminalEmulatorRuntime {
         return;
       }
 
+      const bounds = screen.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      const cellWidth = bounds.width / input.terminal.cols;
+      const cellHeight = bounds.height / input.terminal.rows;
       const totalDeltaX = touch.clientX - activeTouch.startX;
       const totalDeltaY = touch.clientY - activeTouch.startY;
+      let deltaY = touch.clientY - activeTouch.lastY;
       if (activeTouch.mode === null) {
         const absX = Math.abs(totalDeltaX);
         const absY = Math.abs(totalDeltaY);
-        if (absX > 8 || absY > 8) {
+        // Decide before xterm can accumulate a full row, even with small terminal fonts.
+        const directionThreshold = Math.min(8, cellHeight / 2);
+        if (absX > directionThreshold || absY > directionThreshold) {
           activeTouch.mode = absY >= absX ? "vertical" : "horizontal";
+          deltaY = totalDeltaY;
         }
       }
 
-      const deltaY = touch.clientY - activeTouch.lastY;
       activeTouch.lastX = touch.clientX;
       activeTouch.lastY = touch.clientY;
 
       if (activeTouch.mode !== "vertical") {
         return;
       }
-
       touchScrollRemainderPx += deltaY;
-      const lineDelta = Math.trunc(touchScrollRemainderPx / touchScrollLineHeightPx);
-      if (lineDelta !== 0) {
-        input.terminal.scrollLines(-lineDelta);
-        touchScrollRemainderPx -= lineDelta * touchScrollLineHeightPx;
+      const lineDelta = Math.trunc(touchScrollRemainderPx / cellHeight);
+      const x = Math.min(bounds.width - 1, Math.max(0, touch.clientX - bounds.left));
+      const y = Math.min(bounds.height - 1, Math.max(0, touch.clientY - bounds.top));
+      const pixelX = Math.floor(x) + 1;
+      const pixelY = Math.floor(y) + 1;
+      const report = this.inputModeTracker.encodeWheel({
+        direction: lineDelta > 0 ? "up" : "down",
+        col: Math.floor(x / cellWidth) + 1,
+        row: Math.floor(y / cellHeight) + 1,
+        pixelX,
+        pixelY,
+        count: Math.abs(lineDelta),
+      });
+      if (report === null) {
+        // xterm owns history scrolling and non-SGR input, including its binary-only legacy path.
+        touchScrollRemainderPx = 0;
+        return;
       }
 
+      if (report) this.callbacks.onInput?.(report);
+      touchScrollRemainderPx -= lineDelta * cellHeight;
       event.preventDefault();
+      // xterm's document Gesture listener would otherwise deliver the same movement again.
+      event.stopPropagation();
     };
 
     const touchEndHandler = (event: TouchEvent) => {

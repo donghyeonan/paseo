@@ -35,7 +35,9 @@ export function renderTerminalSnapshotToAnsi(state: TerminalState): string {
   // them. Without it (old daemon) we keep the verbatim per-row replay: autowrap off
   // plus a hard newline per row.
   const hasWrapInfo = wrapFlags.length === rows.length;
-  const lines: string[] = hasWrapInfo ? [] : ["\u001b[?7l"];
+  // Select the alternate buffer before drawing; entering it afterwards clears the snapshot.
+  const lines: string[] = state.alternateScreen ? ["\u001b[?1049h"] : [];
+  if (!hasWrapInfo) lines.push("\u001b[?7l");
 
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const row = rows[rowIndex] ?? [];
@@ -55,7 +57,9 @@ export function renderTerminalSnapshotToAnsi(state: TerminalState): string {
   }
   lines.push(`\u001b[${state.cursor.row + 1};${state.cursor.col + 1}H`);
   lines.push(state.cursor.hidden ? "\u001b[?25l" : "\u001b[?25h");
-  if (!hasWrapInfo) {
+  if (state.wraparound !== undefined) {
+    lines.push(state.wraparound ? "\u001b[?7h" : "\u001b[?7l");
+  } else if (!hasWrapInfo) {
     lines.push("\u001b[?7h");
   }
   return lines.join("");
@@ -87,6 +91,8 @@ function renderTerminalRow(row: TerminalCell[], padToCols?: number): string {
 
   for (let index = 0; index < length; index += 1) {
     const cell = row[index] ?? { char: " " };
+    // The preceding wide glyph already occupies this continuation column.
+    if (cell.char === "") continue;
     const nextStyle = getTerminalStyle(cell);
     if (!terminalStylesEqual(previousStyle, nextStyle)) {
       output.push(styleToAnsi(nextStyle));
