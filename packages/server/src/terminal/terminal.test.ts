@@ -568,6 +568,69 @@ describe("createTerminal", () => {
     expect(state.grid[0][1].char).toBe("");
   });
 
+  it("restores a fullscreen app's buffer, autowrap and mouse reporting from a snapshot", async () => {
+    const session = trackSession(
+      await createTerminal({
+        workspaceId: "ws-test",
+        cwd: realpathSync(tmpdir()),
+        cols: 40,
+        rows: 8,
+        command: process.execPath,
+        args: [
+          "-e",
+          'process.stdout.write("\\x1b[?1049h\\x1b[?7l\\x1b[?1000h\\x1b[?1002h\\x1b[?1003h\\x1b[?1004h\\x1b[?1006hPi transcript"); setInterval(() => {}, 100000);',
+        ],
+      }),
+    );
+
+    const state = await waitForState(session, (current) =>
+      getRowText(current, 0).startsWith("Pi transcript"),
+    );
+
+    // Replay the way a reconnecting client does: reset, snapshot, then the replay preamble.
+    const restored = new xterm.Terminal({ cols: 40, rows: 8, allowProposedApi: true });
+    try {
+      await new Promise<void>((resolve) =>
+        restored.write(
+          `\x1bc${renderTerminalSnapshotToAnsi(state)}${session.getReplayPreamble()}`,
+          resolve,
+        ),
+      );
+      expect({
+        buffer: restored.buffer.active.type,
+        wraparound: restored.modes.wraparoundMode,
+        mouse: restored.modes.mouseTrackingMode,
+        firstRow: restored.buffer.active.getLine(0)?.translateToString(true),
+      }).toEqual({
+        buffer: "alternate",
+        wraparound: false,
+        mouse: "any",
+        firstRow: "Pi transcript",
+      });
+    } finally {
+      restored.dispose();
+    }
+  });
+
+  it("leaves an ordinary shell snapshot on the normal buffer without mouse reporting", async () => {
+    const session = trackSession(
+      await createTerminal({
+        workspaceId: "ws-test",
+        cwd: realpathSync(tmpdir()),
+        cols: 40,
+        rows: 8,
+        command: process.execPath,
+        args: ["-e", 'process.stdout.write("$ ls"); setInterval(() => {}, 100000);'],
+      }),
+    );
+
+    const state = await waitForState(session, (current) => getRowText(current, 0) === "$ ls");
+
+    expect(state.alternateScreen).toBeUndefined();
+    expect(state.wraparound).toBeUndefined();
+    expect(session.getReplayPreamble()).toBe("");
+  });
+
   it("captures exit diagnostics from the terminal buffer", async () => {
     const session = trackSession(
       await createTerminal({

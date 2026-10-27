@@ -21,8 +21,12 @@ const ESC = String.fromCharCode(0x1b);
 const APPLICATION_CURSOR_KEYS_MODE = 1;
 const WIN32_INPUT_MODE = 9001;
 const BRACKETED_PASTE_MODE = 2004;
+// Each set replaces the previous protocol or encoding and any reset clears it, as in xterm.
+const MOUSE_TRACKING_MODES = new Set([9, 1000, 1002, 1003]);
+const MOUSE_ENCODING_MODES = new Set([1006, 1016]);
+const RESET_TO_INITIAL_STATE = `${ESC}c`;
 const CSI_INPUT_MODE_SEQUENCE = new RegExp(
-  `${ESC}\\[(?:([<>=?]?)([0-9;]*)u|\\?([0-9;]*)([hl]))`,
+  `${ESC}(?:c|\\[(?:([<>=?]?)([0-9;]*)u|\\?([0-9;]*)([hl])))`,
   "g",
 );
 const INCOMPLETE_CSI_INPUT_MODE_SEQUENCE = new RegExp(`${ESC}\\[[<>=?]?[0-9;]*$`);
@@ -74,6 +78,8 @@ export class TerminalInputModeTracker {
   private win32InputMode = false;
   private applicationCursorKeys = false;
   private bracketedPaste = false;
+  private mouseTrackingMode: number | null = null;
+  private mouseEncodingMode: number | null = null;
   private readonly kittyKeyboardStack: number[] = [];
   private pending = "";
 
@@ -97,6 +103,12 @@ export class TerminalInputModeTracker {
       }
       consumedUntil = CSI_INPUT_MODE_SEQUENCE.lastIndex;
 
+      if (match[0] === RESET_TO_INITIAL_STATE) {
+        changed = this.getPreamble().length > 0 || changed;
+        this.reset();
+        continue;
+      }
+
       if (match[4]) {
         changed = this.applyPrivateModeSequence(match[3] ?? "", match[4]) || changed;
         continue;
@@ -108,10 +120,10 @@ export class TerminalInputModeTracker {
     }
 
     const tail = text.slice(consumedUntil);
-    const pendingStart = tail.lastIndexOf(`${ESC}[`);
+    const pendingStart = tail.lastIndexOf(ESC);
     if (pendingStart >= 0) {
       const pending = tail.slice(pendingStart);
-      if (INCOMPLETE_CSI_INPUT_MODE_SEQUENCE.test(pending)) {
+      if (pending === ESC || INCOMPLETE_CSI_INPUT_MODE_SEQUENCE.test(pending)) {
         this.pending = pending;
       }
     }
@@ -124,6 +136,8 @@ export class TerminalInputModeTracker {
     this.win32InputMode = false;
     this.applicationCursorKeys = false;
     this.bracketedPaste = false;
+    this.mouseTrackingMode = null;
+    this.mouseEncodingMode = null;
     this.kittyKeyboardStack.length = 0;
     this.pending = "";
   }
@@ -158,6 +172,12 @@ export class TerminalInputModeTracker {
     }
     if (this.bracketedPaste) {
       parts.push("\x1b[?2004h");
+    }
+    if (this.mouseTrackingMode !== null) {
+      parts.push(`\x1b[?${this.mouseTrackingMode}h`);
+    }
+    if (this.mouseEncodingMode !== null) {
+      parts.push(`\x1b[?${this.mouseEncodingMode}h`);
     }
     return parts.join("");
   }
@@ -204,6 +224,18 @@ export class TerminalInputModeTracker {
   private applyPrivateModeSequence(params: string, final: string): boolean {
     const modes = parsePrivateModeParams(params);
     let changed = false;
+
+    for (const mode of modes) {
+      const next = final === "h" ? mode : null;
+      if (MOUSE_TRACKING_MODES.has(mode)) {
+        changed = this.mouseTrackingMode !== next || changed;
+        this.mouseTrackingMode = next;
+      }
+      if (MOUSE_ENCODING_MODES.has(mode)) {
+        changed = this.mouseEncodingMode !== next || changed;
+        this.mouseEncodingMode = next;
+      }
+    }
 
     if (modes.has(WIN32_INPUT_MODE)) {
       const previous = this.win32InputMode;

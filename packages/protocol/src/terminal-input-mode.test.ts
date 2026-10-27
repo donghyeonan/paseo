@@ -118,6 +118,41 @@ describe("TerminalInputModeTracker", () => {
     expect(tracker.getPreamble()).toBe("");
   });
 
+  it("replays the latest mouse tracking and SGR encoding modes", () => {
+    const tracker = new TerminalInputModeTracker();
+
+    tracker.feed("\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h");
+
+    expect(tracker.getPreamble()).toBe("\x1b[?1003h\x1b[?1006h");
+    expect(tracker.getState()).toEqual({
+      kittyKeyboardFlags: 0,
+      win32InputMode: false,
+      applicationCursorKeys: false,
+      bracketedPaste: false,
+    });
+  });
+
+  it("stops replaying mouse modes once the program disables them", () => {
+    const tracker = new TerminalInputModeTracker();
+    tracker.feed("\x1b[?1000;1006h");
+
+    tracker.feed("\x1b[?1000l");
+    expect(tracker.getPreamble()).toBe("\x1b[?1006h");
+
+    tracker.feed("\x1b[?1006l");
+    expect(tracker.getPreamble()).toBe("");
+  });
+
+  it("forgets every mode when the program resets the terminal, even across chunks", () => {
+    const tracker = new TerminalInputModeTracker();
+    tracker.feed("\x1b[>7u\x1b[?1h\x1b[?2004h\x1b[?1003h\x1b[?1006h");
+
+    tracker.feed("\x1b");
+    expect(tracker.feed("c").changed).toBe(true);
+
+    expect(tracker.getPreamble()).toBe("");
+  });
+
   it("ignores encoded key input sequences", () => {
     const tracker = new TerminalInputModeTracker();
 

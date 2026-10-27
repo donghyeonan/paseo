@@ -35,7 +35,11 @@ export function renderTerminalSnapshotToAnsi(state: TerminalState): string {
   // them. Without it (old daemon) we keep the verbatim per-row replay: autowrap off
   // plus a hard newline per row.
   const hasWrapInfo = wrapFlags.length === rows.length;
-  const lines: string[] = hasWrapInfo ? [] : ["\u001b[?7l"];
+  // Entering the alternate buffer clears it, so select it before drawing.
+  const lines: string[] = state.alternateScreen ? ["\u001b[?1049h"] : [];
+  if (!hasWrapInfo) {
+    lines.push("\u001b[?7l");
+  }
 
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const row = rows[rowIndex] ?? [];
@@ -55,7 +59,10 @@ export function renderTerminalSnapshotToAnsi(state: TerminalState): string {
   }
   lines.push(`\u001b[${state.cursor.row + 1};${state.cursor.col + 1}H`);
   lines.push(state.cursor.hidden ? "\u001b[?25l" : "\u001b[?25h");
-  if (!hasWrapInfo) {
+  // Wrapped rows are drawn with autowrap on, so the program's autowrap-off applies last.
+  if (state.wraparound === false) {
+    lines.push("\u001b[?7l");
+  } else if (!hasWrapInfo) {
     lines.push("\u001b[?7h");
   }
   return lines.join("");

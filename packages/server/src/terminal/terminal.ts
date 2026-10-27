@@ -1336,6 +1336,8 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
       }),
       cursor: extractCursorState(terminal),
       ...(title ? { title } : {}),
+      ...(terminal.buffer.active.type === "alternate" ? { alternateScreen: true } : {}),
+      ...(terminal.modes.wraparoundMode ? {} : { wraparound: false }),
       ...(snapshotOptions?.includeWrapFlags
         ? {
             gridWrapped: extractGridWrapped(terminal),

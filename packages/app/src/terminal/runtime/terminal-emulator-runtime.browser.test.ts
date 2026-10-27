@@ -1,6 +1,11 @@
 import { page, userEvent } from "@vitest/browser/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { TerminalInputModeState } from "@getpaseo/protocol/terminal-input-mode";
+import type { TerminalState } from "@getpaseo/protocol/messages";
+import type { Terminal } from "@xterm/xterm";
+import {
+  TerminalInputModeTracker,
+  type TerminalInputModeState,
+} from "@getpaseo/protocol/terminal-input-mode";
 import type { TerminalFile } from "../file-paste";
 import {
   encodeTerminalOutput,
@@ -32,6 +37,7 @@ interface TerminalKeyRecord {
 }
 
 type BrowserTerminal = TerminalSize & {
+  buffer: Terminal["buffer"];
   input: (data: string, wasUserInput?: boolean) => void;
   refresh: (start: number, end: number) => void;
   reset: () => void;
@@ -290,6 +296,54 @@ async function clickTerminalLink(input: {
     predicate: () => input.host.querySelector(".xterm-cursor-pointer") !== null,
   });
   await userEvent.click(screen, { position });
+}
+
+// Pi's startup: alternate screen, no autowrap, any-motion mouse tracking with SGR reports.
+const FULLSCREEN_APP_STARTUP =
+  "\x1b[?1049h\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h\x1b[2J\x1b[HPi transcript";
+
+function snapshotRow(text: string): TerminalState["grid"][number] {
+  return Array.from(text, (char) => ({ char }));
+}
+
+function writeOutput(mounted: MountedTerminal, text: string): Promise<void> {
+  return new Promise((resolve) => {
+    mounted.runtime.write({ data: terminalOutput(text), onCommitted: resolve });
+  });
+}
+
+// Mirrors a daemon restore: the restore frame renders the snapshot, then the replay
+// preamble from the daemon's input-mode tracker (fed the same PTY output) follows as output.
+async function restoreFromDaemon(input: {
+  mounted: MountedTerminal;
+  ptyOutput: string;
+  state: TerminalState;
+}): Promise<void> {
+  const tracker = new TerminalInputModeTracker();
+  tracker.feed(input.ptyOutput);
+  await new Promise<void>((resolve) => {
+    input.mounted.runtime.renderSnapshot({ state: input.state, onCommitted: resolve });
+  });
+  await writeOutput(input.mounted, tracker.getPreamble());
+}
+
+async function wheelOverTerminal(
+  mounted: MountedTerminal,
+  direction: "up" | "down",
+): Promise<string[]> {
+  const screen = mounted.host.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen) {
+    throw new Error("Expected xterm screen to be mounted");
+  }
+  const inputCount = mounted.inputs.length;
+  await userEvent.wheel(screen, { direction });
+  await nextFrame();
+  // Hovering also produces motion reports under any-motion tracking; keep only wheel input.
+  return mounted.inputs.slice(inputCount).filter((data) => !data.startsWith("\x1b[<35;"));
+}
+
+function isSgrWheelDownReport(report: string): boolean {
+  return report.startsWith("\x1b[<65;") && /^\d+;\d+M$/.test(report.slice("\x1b[<65;".length));
 }
 
 afterEach(() => {
@@ -793,5 +847,73 @@ describe("terminal emulator runtime in a real browser", () => {
 
     expect(mounted.openedUrls).toEqual(["https://example.com/plain", "https://example.com/osc8"]);
     expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps sending wheel reports to a fullscreen app after a snapshot restore and redraw", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    const terminal = getBrowserTerminal();
+
+    await writeOutput(mounted, FULLSCREEN_APP_STARTUP);
+    const liveReports = await wheelOverTerminal(mounted, "down");
+    expect(liveReports.length).toBeGreaterThan(0);
+    expect(liveReports.every(isSgrWheelDownReport)).toBe(true);
+
+    await restoreFromDaemon({
+      mounted,
+      ptyOutput: FULLSCREEN_APP_STARTUP,
+      state: {
+        rows: terminal.rows,
+        cols: terminal.cols,
+        scrollback: [],
+        grid: [snapshotRow("Pi transcript")],
+        cursor: { row: 0, col: 13, hidden: true },
+        alternateScreen: true,
+        wraparound: false,
+      },
+    });
+    const restoredReports = await wheelOverTerminal(mounted, "down");
+    expect(restoredReports).toEqual(liveReports);
+    expect(terminal.buffer.active.getLine(0)?.translateToString(true)).toBe("Pi transcript");
+
+    // A session switch redraws the whole screen without repeating the startup modes.
+    await writeOutput(mounted, "\x1b[?2026h\x1b[H\x1b[2JResumed session\x1b[?2026l");
+    const redrawnReports = await wheelOverTerminal(mounted, "down");
+    expect(redrawnReports).toEqual(liveReports);
+    expect(terminal.buffer.active.getLine(0)?.translateToString(true)).toBe("Resumed session");
+  });
+
+  it.each([
+    { name: "only a shell ran", ptyOutput: "$ ls\r\n" },
+    {
+      name: "the app disabled mouse reporting and left the alternate screen",
+      ptyOutput: `${FULLSCREEN_APP_STARTUP}\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?7h\x1b[?1049l`,
+    },
+    { name: "the terminal was reset", ptyOutput: `${FULLSCREEN_APP_STARTUP}\x1bc` },
+  ])("leaves wheel scrolling to the shell after a restore when $name", async ({ ptyOutput }) => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    const terminal = getBrowserTerminal();
+    const history = Array.from({ length: terminal.rows * 2 }, (_, index) => `line ${index}`);
+
+    await restoreFromDaemon({
+      mounted,
+      ptyOutput,
+      state: {
+        rows: terminal.rows,
+        cols: terminal.cols,
+        scrollback: history.slice(0, terminal.rows).map(snapshotRow),
+        grid: history.slice(terminal.rows).map(snapshotRow),
+        cursor: { row: terminal.rows - 1, col: 0 },
+      },
+    });
+    const buffer = terminal.buffer.active;
+    expect(buffer.type).toBe("normal");
+    expect(buffer.baseY).toBe(terminal.rows);
+
+    expect(await wheelOverTerminal(mounted, "up")).toEqual([]);
+    await waitFor({ predicate: () => terminal.buffer.active.viewportY < terminal.rows });
   });
 });

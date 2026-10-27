@@ -1,4 +1,7 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { runWorkspaceActionFromCommandCenter } from "../support/helpers/command-center-workspace-actions";
 import { test, expect } from "../support/fixtures";
 import { TerminalE2EHarness, withTerminalInApp } from "../support/helpers/terminal-dsl";
 import { getTabTestIds } from "../support/helpers/launcher";
@@ -187,6 +190,102 @@ test.describe("Terminal alternate-screen transitions", () => {
         "normal-screen restore should not flash to a mostly blank prompt-at-top frame",
       ).toEqual([]);
     });
+  });
+
+  test("preserves wheel and drag input in both fullscreen split terminals after page reload", async ({
+    page,
+  }, testInfo) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const terminals = [];
+    const program = `
+      const fs = require('node:fs');
+      const destination = process.argv[1];
+      fs.writeFileSync(destination, '');
+      process.stdin.setRawMode(true);
+      process.stdin.setEncoding('utf8');
+      process.stdout.write('Press g to start fullscreen');
+      process.stdin.on('data', data => {
+        fs.appendFileSync(destination, data);
+        if (data === 'g') {
+          process.stdout.write('\\x1b[?1049h\\x1b[?7l\\x1b[?1003h\\x1b[?1006h\\x1b[2J\\x1b[HFullscreen wheel receiver');
+        }
+      });
+    `;
+
+    async function verifyWheelAndKeyboard(surface: Locator, received: string): Promise<void> {
+      const before = await readFile(received, "utf8");
+      const wheelReports = before.split("\u001b[<64;").length - 1;
+      const keyPresses = before.split("k").length - 1;
+      await surface.click();
+      await surface.locator(".xterm-helper-textarea").press("k");
+      await expect
+        .poll(async () => (await readFile(received, "utf8")).split("k").length - 1)
+        .toBeGreaterThan(keyPresses);
+      await surface.hover();
+      await page.mouse.wheel(0, -120);
+      await expect
+        .poll(async () => {
+          const input = await readFile(received, "utf8");
+          return input.split("\u001b[<64;").length - 1;
+        })
+        .toBeGreaterThan(wheelReports);
+
+      const dragStart = (await readFile(received, "utf8")).length;
+      const screen = await surface.locator(".xterm-screen").boundingBox();
+      if (!screen) throw new Error("Terminal screen is not visible");
+      await page.mouse.move(screen.x + 10, screen.y + 8);
+      await page.mouse.down();
+      await page.mouse.move(screen.x + 120, screen.y + 8, { steps: 4 });
+      await page.mouse.up();
+      await expect
+        .poll(async () => (await readFile(received, "utf8")).slice(dragStart))
+        .toMatch(/\[<0;\d+;\d+m/);
+      const drag = (await readFile(received, "utf8")).slice(dragStart);
+      expect(drag).toMatch(/\[<0;\d+;\d+M/);
+      expect(drag).toMatch(/\[<32;\d+;\d+M/);
+    }
+
+    try {
+      for (const name of ["Left fullscreen", "Right fullscreen"]) {
+        const received = path.join(harness.tempRepo.path, `${name}.input`);
+        const terminal = await harness.createTerminal({
+          name,
+          command: process.execPath,
+          args: ["-e", program, received],
+        });
+        terminals.push({ ...terminal, received });
+      }
+      const [first, second] = terminals;
+      await harness.openTerminal(page, { terminalId: first.id });
+      await runWorkspaceActionFromCommandCenter(page, "Split pane right");
+      await page.getByTestId(`workspace-tab-terminal_${second.id}`).first().click();
+      await runWorkspaceActionFromCommandCenter(page, "Move tab right");
+
+      for (const terminal of terminals) {
+        const pane = page.getByTestId("split-group-child").filter({
+          has: page.getByTestId(`workspace-tab-terminal_${terminal.id}`),
+        });
+        const surface = pane.getByTestId("terminal-surface");
+        await surface.click();
+        await surface.locator(".xterm-helper-textarea").press("g");
+        await verifyWheelAndKeyboard(surface, terminal.received);
+      }
+      await page.screenshot({ path: testInfo.outputPath("fullscreen-before-reload.png") });
+      await page.reload();
+      for (const terminal of terminals) {
+        const pane = page.getByTestId("split-group-child").filter({
+          has: page.getByTestId(`workspace-tab-terminal_${terminal.id}`),
+        });
+        const surface = pane.getByTestId("terminal-surface");
+        await expect(surface).toBeVisible();
+        await expect(pane.getByTestId("terminal-attach-loading")).toBeHidden();
+        await verifyWheelAndKeyboard(surface, terminal.received);
+      }
+      await page.screenshot({ path: testInfo.outputPath("fullscreen-after-reload.png") });
+    } finally {
+      for (const terminal of terminals) await harness.killTerminal(terminal.id);
+    }
   });
 
   test("opening vim in a new terminal fills the terminal surface", async ({ page }, testInfo) => {

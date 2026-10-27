@@ -6519,6 +6519,10 @@ export const TerminalStateSchema = z.object({
   // `terminalReflowableSnapshot` capability, so old daemons/clients are unaffected.
   gridWrapped: z.array(z.boolean()).optional(),
   scrollbackWrapped: z.array(z.boolean()).optional(),
+  // Screen modes a fullscreen program left set. Absent means the normal buffer
+  // with autowrap on, which is what old daemons' snapshots restore to.
+  alternateScreen: z.boolean().optional(),
+  wraparound: z.boolean().optional(),
 });
 
 export const ListTerminalsResponseSchema = z.object({
